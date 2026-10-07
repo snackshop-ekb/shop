@@ -4,7 +4,8 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
 <title>Магазин</title>
-<script src="https://telegram.org/js/telegram-web-app.js"></script>
+<link rel="preconnect" href="https://script.google.com"><link rel="preconnect" href="https://script.googleusercontent.com">
+<script src="https://telegram.org/js/telegram-web-app.js" async onload="window.__tgReady && window.__tgReady()"></script>
 <style>
   :root {
     --bg: var(--tg-theme-secondary-bg-color, #f2f2f5);
@@ -230,13 +231,15 @@
 (function () {
   'use strict';
 
-  const tg = window.Telegram && window.Telegram.WebApp;
-  const inTelegram = !!(tg && tg.initData);
+  // Скрипт Telegram грузится параллельно — магазин не ждёт его
+  let tg = null, inTelegram = false;
   const API = new URLSearchParams(location.search).get('api');
   const DEMO = !API;
   const PARAMS = new URLSearchParams(location.search);
   const START = PARAMS.get('screen');
   const CART_KEY = 'shop_cart_v1';
+  const CAT_KEY = 'shop_catalog_v1';
+  let catalogShown = false;
 
   const state = {
     shop: null, products: [], byId: {}, points: [],
@@ -260,13 +263,24 @@
   const haptic = (type) => { try { tg && tg.HapticFeedback && (type === 'ok' ? tg.HapticFeedback.notificationOccurred('success') : tg.HapticFeedback.impactOccurred('light')); } catch (e) {} };
 
   /* ---------- Запуск ---------- */
-  if (tg) {
+  function setupTg() {
+    if (tg || !(window.Telegram && window.Telegram.WebApp)) return;
+    tg = window.Telegram.WebApp;
+    inTelegram = !!tg.initData;
     try { tg.ready(); tg.expand(); } catch (e) {}
     try { if (tg.isVersionAtLeast && tg.isVersionAtLeast('7.7')) tg.disableVerticalSwipes(); } catch (e) {}
     try { tg.BackButton.onClick(goBack); } catch (e) {}
     const u = tg.initDataUnsafe && tg.initDataUnsafe.user;
-    if (u) state.form.name = [u.first_name, u.last_name].filter(Boolean).join(' ');
+    if (u && !state.form.name) state.form.name = [u.last_name, u.first_name].filter(Boolean).join(' ');
+    if (inTelegram) {
+      $('backLink').hidden = true;
+      try { (state.view === 'cart' || state.view === 'wallet' || state.view === 'feedback') ? tg.BackButton.show() : tg.BackButton.hide(); } catch (e) {}
+      if (state.shop && state.shop.wallet) loadMe();
+    }
+    if (state.view !== 'catalog') renderBottom();
   }
+  window.__tgReady = setupTg;
+  setupTg();
 
   $('backLink').onclick = goBack;
   $('mainBtn').onclick = onMain;
@@ -297,9 +311,30 @@
 
   /* ---------- Данные ---------- */
   async function loadCatalog() {
+    // 1) мгновенно показываем каталог из памяти телефона (если уже открывали)
+    if (!DEMO && !catalogShown) {
+      try {
+        const cached = JSON.parse(localStorage.getItem(CAT_KEY) || 'null');
+        if (cached && cached.ok && cached.api === API) { applyCatalog(cached); catalogShown = true; }
+      } catch (e) {}
+    }
+    // 2) в фоне берём свежие данные (цены, остатки)
     try {
       const data = DEMO ? demoData() : await (await fetch(API + '?action=catalog', { cache: 'no-store' })).json();
       if (!data.ok) throw new Error(data.error || 'Ошибка');
+      if (!DEMO) { try { data.api = API; localStorage.setItem(CAT_KEY, JSON.stringify(data)); } catch (e) {} }
+      applyCatalog(data);
+      catalogShown = true;
+    } catch (e) {
+      if (catalogShown) return toast('Нет связи — показан сохранённый каталог');
+      $('catalogView').innerHTML = '<div class="empty"><b>😕</b>Не удалось загрузить магазин.<br>Проверьте интернет и попробуйте ещё раз.<br><br>' +
+        '<button class="chip on" id="retry">Повторить</button></div>';
+      $('retry').onclick = () => { showSkeleton(); loadCatalog(); };
+    }
+  }
+
+  function applyCatalog(data) {
+    {
       state.shop = data.shop;
       state.points = data.points || [];
       state.products = data.products || [];
@@ -323,10 +358,6 @@
         loadMe();
         if (START === 'wallet' && !state.startDone) { state.startDone = true; go('wallet'); }
       } else if (state.view === 'wallet') go('catalog');
-    } catch (e) {
-      $('catalogView').innerHTML = '<div class="empty"><b>😕</b>Не удалось загрузить магазин.<br>Проверьте интернет и попробуйте ещё раз.<br><br>' +
-        '<button class="chip on" id="retry">Повторить</button></div>';
-      $('retry').onclick = () => { showSkeleton(); loadCatalog(); };
     }
   }
 
@@ -411,7 +442,7 @@
   function picHtml(p, cls) {
     const ph = p.photo || '';
     if (/^https?:\/\//.test(ph)) {
-      return '<div class="' + cls + '"><img src="' + esc(ph) + '" alt="" loading="lazy" onerror="this.parentNode.classList.add(\'noimg\');this.remove()"></div>';
+      return '<div class="' + cls + '"><img src="' + esc(ph) + '" alt="" loading="lazy" decoding="async" onerror="this.parentNode.classList.add(\'noimg\');this.remove()"></div>';
     }
     return '<div class="' + cls + (ph ? '' : ' noimg') + '">' + esc(ph) + '</div>';
   }
